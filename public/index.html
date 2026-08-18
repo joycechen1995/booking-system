@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>線上預約</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1 id="business-name">線上預約</h1>
+    <p>選擇一個方便的時間，我們會透過 Email 傳送確認與會議連結給您。</p>
+  </div>
+
+  <div class="card booking-layout">
+    <div>
+      <div class="calendar-nav">
+        <button id="prev-month">‹</button>
+        <strong id="month-label"></strong>
+        <button id="next-month">›</button>
+      </div>
+      <div class="calendar-grid" id="calendar-grid"></div>
+    </div>
+
+    <div class="slots-panel">
+      <h3 id="slots-title">請先選擇日期</h3>
+      <div class="slot-list" id="slot-list"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-overlay" style="display:none;">
+  <div class="modal">
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
