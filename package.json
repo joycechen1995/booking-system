@@ -1,0 +1,21 @@
+{
+  "name": "booking-system",
+  "version": "1.0.0",
+  "description": "個人接案/諮詢預約系統（類似 Calendly）",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dayjs": "^1.11.13",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "google-auth-library": "^9.14.1",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.15"
+  }
+}
