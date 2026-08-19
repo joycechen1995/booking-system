@@ -1,6 +1,8 @@
 const nodemailer = require('nodemailer');
 const { getSetting } = require('./settings');
 
+const LINE_OA_URL = 'https://lin.ee/tJhE64S';
+
 function isConfigured() {
   return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 }
@@ -63,6 +65,7 @@ async function sendBookingConfirmation(booking) {
     ${meetHtml}
     ${formatAnswers(booking.answers)}
     <p>若需取消或更改時間，請直接回覆此信與我們聯繫。</p>
+    <p><a href="${LINE_OA_URL}">👉 點我加入官方 LINE 好友</a>，隨時掌握最新消息與提醒。</p>
     <p>期待與您見面！</p>
   `;
   await sendMail({
