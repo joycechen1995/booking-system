@@ -112,7 +112,7 @@
     state.selectedDate = dateStr;
     state.selectedSlot = null;
     renderCalendar();
-    el.slotsTitle.textContent = `${dateStr} 可預約時段`;
+    el.slotsTitle.textContent = `${dateStr} 可預約時段（台北時間）`;
     el.slotList.innerHTML = `<div class="empty-hint">載入中…</div>`;
 
     const res = await fetch(`/api/availability?date=${dateStr}`);
@@ -146,7 +146,7 @@
 
     el.modalBody.innerHTML = `
       <h2>確認預約</h2>
-      <p style="color:#6b7280;font-size:14px;">${dateStr} ${slot} - ${addMinutesStr(slot, state.config.slotDurationMin)}</p>
+      <p style="color:#6b7280;font-size:14px;">${dateStr} ${slot} - ${addMinutesStr(slot, state.config.slotDurationMin)}（台北時間 GMT+8）</p>
       <div id="modal-error"></div>
       <div class="form-group">
         <label>姓名 <span style="color:#dc2626">*</span></label>
@@ -230,6 +230,8 @@
     }
   }
 
+  const LINE_OA_URL = 'https://lin.ee/tJhE64S';
+
   function showSuccess(booking) {
     const meetHtml = booking.meet_link
       ? `<div class="meet-link-box">視訊會議連結：<br/><a href="${booking.meet_link}" target="_blank">${booking.meet_link}</a></div>`
@@ -238,10 +240,11 @@
       <div class="success-box">
         <div class="icon">✅</div>
         <h2>預約成功！</h2>
-        <p>${booking.date} ${booking.start_time} - ${booking.end_time}</p>
+        <p>${booking.date} ${booking.start_time} - ${booking.end_time}（台北時間 GMT+8）</p>
         ${meetHtml}
         <p style="color:#6b7280;font-size:13px;">確認信已寄至您的信箱，會議前一小時也會收到提醒信。</p>
-        <button class="btn" id="modal-close">完成</button>
+        <a class="btn" style="background:#06C755;display:block;margin-bottom:10px;text-decoration:none;" href="${LINE_OA_URL}" target="_blank">加入官方 LINE 好友</a>
+        <button class="btn secondary" id="modal-close">完成</button>
       </div>
     `;
     document.getElementById('modal-close').addEventListener('click', closeModal);
