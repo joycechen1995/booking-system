@@ -135,13 +135,29 @@
   function openBookingModal(dateStr, slot) {
     const questions = state.config.questions || [];
     const questionsHtml = questions
-      .map(
-        (q) => `
-      <div class="form-group">
+      .map((q) => {
+        if (q.type === 'choice' && Array.isArray(q.options) && q.options.length > 0) {
+          const optionsHtml = q.options
+            .map(
+              (opt) => `
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400;margin-bottom:6px;cursor:pointer;">
+              <input type="radio" name="q-${q.id}" value="${escapeHtml(opt)}" />
+              <span>${escapeHtml(opt)}</span>
+            </label>`
+            )
+            .join('');
+          return `
+      <div class="form-group" data-qid="${q.id}" data-qtype="choice">
         <label>${escapeHtml(q.label)} ${q.required ? '<span style="color:#dc2626">*</span>' : ''}</label>
-        <textarea data-qid="${q.id}" ${q.required ? 'required' : ''}></textarea>
-      </div>`
-      )
+        <div>${optionsHtml}</div>
+      </div>`;
+        }
+        return `
+      <div class="form-group" data-qid="${q.id}" data-qtype="text">
+        <label>${escapeHtml(q.label)} ${q.required ? '<span style="color:#dc2626">*</span>' : ''}</label>
+        <textarea></textarea>
+      </div>`;
+      })
       .join('');
 
     el.modalBody.innerHTML = `
@@ -197,10 +213,15 @@
       return;
     }
 
-    const answers = Array.from(document.querySelectorAll('[data-qid]')).map((elm) => ({
-      id: parseInt(elm.dataset.qid, 10),
-      answer: elm.value.trim(),
-    }));
+    const answers = Array.from(document.querySelectorAll('.form-group[data-qid]')).map((wrap) => {
+      const id = parseInt(wrap.dataset.qid, 10);
+      if (wrap.dataset.qtype === 'choice') {
+        const checked = wrap.querySelector('input[type="radio"]:checked');
+        return { id, answer: checked ? checked.value : '' };
+      }
+      const textarea = wrap.querySelector('textarea');
+      return { id, answer: textarea ? textarea.value.trim() : '' };
+    });
 
     const submitBtn = document.getElementById('modal-submit');
     submitBtn.disabled = true;

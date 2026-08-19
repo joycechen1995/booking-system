@@ -303,7 +303,7 @@
     try {
       const { questions } = await api('/api/admin/questions');
       content.innerHTML = `
-        <p class="hint">設定客戶預約時需要額外回答的問題（例如「諮詢主題」、「聯絡電話」）。</p>
+        <p class="hint">設定客戶預約時需要額外回答的問題。建議大部分問題設為「選擇題（單選）」方便客戶快速勾選、也方便您篩選客戶；只留「最關鍵」的一題設為「文字回答」讓客戶自行輸入。</p>
         <div id="questions-list"></div>
         <button class="btn secondary" id="add-question" style="margin-top:8px;">+ 新增問題</button>
         <div style="margin-top:20px;">
@@ -316,12 +316,27 @@
       function addRow(q) {
         const row = document.createElement('div');
         row.className = 'question-row';
+        row.style.cssText = 'display:flex; gap:8px; align-items:flex-start; margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--border);';
+        const type = q && q.type === 'text' ? 'text' : 'choice';
+        const optionsStr = q && Array.isArray(q.options) ? q.options.join('\n') : '';
         row.innerHTML = `
-          <input type="text" class="q-label" placeholder="問題內容" value="${escapeHtml(q ? q.label : '')}" style="flex:1;" />
-          <label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" class="q-required" ${!q || q.required ? 'checked' : ''}/> 必填</label>
+          <div style="flex:1;">
+            <input type="text" class="q-label" placeholder="問題內容" value="${escapeHtml(q ? q.label : '')}" style="width:100%;margin-bottom:6px;" />
+            <textarea class="q-options" placeholder="每行一個選項，例如：\n每月10萬以下\n每月10-30萬\n每月30萬以上" rows="3" style="width:100%; ${type === 'choice' ? '' : 'display:none;'}">${escapeHtml(optionsStr)}</textarea>
+          </div>
+          <select class="q-type" style="min-width:130px;">
+            <option value="choice" ${type === 'choice' ? 'selected' : ''}>選擇題（單選）</option>
+            <option value="text" ${type === 'text' ? 'selected' : ''}>文字回答</option>
+          </select>
+          <label style="font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;padding-top:8px;"><input type="checkbox" class="q-required" ${!q || q.required ? 'checked' : ''}/> 必填</label>
           <button class="icon-btn">✕</button>
         `;
         row.querySelector('.icon-btn').addEventListener('click', () => row.remove());
+        const typeSelect = row.querySelector('.q-type');
+        const optionsBox = row.querySelector('.q-options');
+        typeSelect.addEventListener('change', () => {
+          optionsBox.style.display = typeSelect.value === 'choice' ? '' : 'none';
+        });
         list.appendChild(row);
       }
 
@@ -330,12 +345,28 @@
 
       document.getElementById('save-questions').addEventListener('click', async () => {
         const newQuestions = Array.from(list.querySelectorAll('.question-row'))
-          .map((row) => ({
-            label: row.querySelector('.q-label').value.trim(),
-            required: row.querySelector('.q-required').checked,
-          }))
+          .map((row) => {
+            const type = row.querySelector('.q-type').value === 'text' ? 'text' : 'choice';
+            const options = row
+              .querySelector('.q-options')
+              .value.split('\n')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            return {
+              label: row.querySelector('.q-label').value.trim(),
+              type,
+              options,
+              required: row.querySelector('.q-required').checked,
+            };
+          })
           .filter((q) => q.label);
         const msg = document.getElementById('questions-msg');
+        const bad = newQuestions.find((q) => q.type === 'choice' && q.options.length < 2);
+        if (bad) {
+          msg.textContent = `「${bad.label}」選擇題至少需要 2 個選項（每行一個）`;
+          msg.style.color = '#dc2626';
+          return;
+        }
         try {
           await api('/api/admin/questions', { method: 'POST', body: JSON.stringify({ questions: newQuestions }) });
           msg.textContent = '已儲存';
