@@ -6,7 +6,7 @@ const dayjs = require('dayjs');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
 dayjs.extend(customParseFormat);
 
-const db = require('./db');
+const { client, ready } = require('./db');
 const { getSetting, setSetting, getAllSettings } = require('./settings');
 const { getAvailableSlots, isWithinBookingWindow, timeToMinutes } = require('./availability');
 const mailer = require('./mailer');
@@ -38,33 +38,58 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function mapQuestionRow(q) {
+  return {
+    id: q.id,
+    label: q.label,
+    type: q.type === 'choice' ? 'choice' : 'text',
+    options: q.options ? JSON.parse(q.options) : [],
+    required: !!q.required,
+  };
+}
+
+async function getQuestions() {
+  const res = await client.execute('SELECT * FROM questions ORDER BY sort_order ASC');
+  return res.rows.map(mapQuestionRow);
+}
+
 // ---------------------------------------------------------------------------
 // 公開 API
 // ---------------------------------------------------------------------------
 
-app.get('/api/config', (req, res) => {
-  const s = getAllSettings();
-  const questions = db.prepare('SELECT * FROM questions ORDER BY sort_order ASC').all();
-  res.json({
-    businessName: s.business_name,
-    slotDurationMin: parseInt(s.slot_duration_min, 10),
-    bookingWindowDays: parseInt(s.booking_window_days, 10),
-    timezone: s.timezone,
-    questions: questions.map((q) => ({ id: q.id, label: q.label, required: !!q.required })),
-    googleMeetEnabled: googleCalendar.isConfigured(),
-  });
+app.get('/api/config', async (req, res) => {
+  try {
+    const s = await getAllSettings();
+    const questions = await getQuestions();
+    res.json({
+      businessName: s.business_name,
+      slotDurationMin: parseInt(s.slot_duration_min, 10),
+      bookingWindowDays: parseInt(s.booking_window_days, 10),
+      timezone: s.timezone,
+      questions,
+      googleMeetEnabled: googleCalendar.isConfigured(),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
 });
 
-app.get('/api/availability', (req, res) => {
-  const { date } = req.query;
-  if (!date || !dayjs(date, 'YYYY-MM-DD', true).isValid()) {
-    return res.status(400).json({ error: '日期格式錯誤' });
+app.get('/api/availability', async (req, res) => {
+  try {
+    const { date } = req.query;
+    if (!date || !dayjs(date, 'YYYY-MM-DD', true).isValid()) {
+      return res.status(400).json({ error: '日期格式錯誤' });
+    }
+    if (!(await isWithinBookingWindow(date))) {
+      return res.json({ slots: [] });
+    }
+    const slots = await getAvailableSlots(date);
+    res.json({ slots });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
   }
-  if (!isWithinBookingWindow(date)) {
-    return res.json({ slots: [] });
-  }
-  const slots = getAvailableSlots(date);
-  res.json({ slots });
 });
 
 app.post('/api/bookings', async (req, res) => {
@@ -77,27 +102,31 @@ app.post('/api/bookings', async (req, res) => {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: 'Email 格式錯誤' });
     }
-    if (!isWithinBookingWindow(date)) {
+    if (!(await isWithinBookingWindow(date))) {
       return res.status(400).json({ error: '此日期不開放預約' });
     }
 
     // 檢查此時段是否仍然可預約（避免併發搶單）
-    const available = getAvailableSlots(date);
+    const available = await getAvailableSlots(date);
     if (!available.includes(start_time)) {
       return res.status(409).json({ error: '此時段已被預約或不可預約，請重新選擇' });
     }
 
-    const duration = parseInt(getSetting('slot_duration_min') || '30', 10);
+    const duration = parseInt((await getSetting('slot_duration_min')) || '30', 10);
     const endTime = dayjs(`${date} ${start_time}`, 'YYYY-MM-DD HH:mm')
       .add(duration, 'minute')
       .format('HH:mm');
 
-    // 檢查必填自訂問題
-    const questions = db.prepare('SELECT * FROM questions ORDER BY sort_order ASC').all();
+    // 檢查必填自訂問題（選擇題答案須為選項之一）
+    const questions = await getQuestions();
     const answerMap = new Map((answers || []).map((a) => [a.id, a.answer]));
     for (const q of questions) {
-      if (q.required && !String(answerMap.get(q.id) || '').trim()) {
+      const ans = String(answerMap.get(q.id) || '').trim();
+      if (q.required && !ans) {
         return res.status(400).json({ error: `請填寫：${q.label}` });
+      }
+      if (q.type === 'choice' && ans && !q.options.includes(ans)) {
+        return res.status(400).json({ error: `「${q.label}」的回答不是有效選項` });
       }
     }
     const answersOut = questions.map((q) => ({
@@ -105,8 +134,8 @@ app.post('/api/bookings', async (req, res) => {
       answer: answerMap.get(q.id) || '',
     }));
 
-    const timezone = getSetting('timezone') || 'Asia/Taipei';
-    const businessName = getSetting('business_name') || '預約';
+    const timezone = (await getSetting('timezone')) || 'Asia/Taipei';
+    const businessName = (await getSetting('business_name')) || '預約';
 
     // 嘗試建立 Google Meet 會議（若未設定 Google 授權則跳過，不影響預約流程）
     let meetLink = null;
@@ -129,12 +158,10 @@ app.post('/api/bookings', async (req, res) => {
       console.error('建立 Google Meet 會議失敗（預約仍會照常成立）:', err.message);
     }
 
-    const info = db
-      .prepare(
-        `INSERT INTO bookings (date, start_time, end_time, name, email, answers, meet_link, calendar_event_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
+    const insertRes = await client.execute({
+      sql: `INSERT INTO bookings (date, start_time, end_time, name, email, answers, meet_link, calendar_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
         date,
         start_time,
         endTime,
@@ -142,10 +169,16 @@ app.post('/api/bookings', async (req, res) => {
         email.trim(),
         JSON.stringify(answersOut),
         meetLink,
-        calendarEventId
-      );
+        calendarEventId,
+      ],
+    });
 
-    const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(info.lastInsertRowid);
+    const bookingId = Number(insertRes.lastInsertRowid);
+    const bookingRes = await client.execute({
+      sql: 'SELECT * FROM bookings WHERE id = ?',
+      args: [bookingId],
+    });
+    const booking = bookingRes.rows[0];
     booking.answers = answersOut;
 
     mailer.sendBookingConfirmation(booking).catch((err) => {
@@ -172,150 +205,224 @@ app.post('/api/bookings', async (req, res) => {
 // Admin API
 // ---------------------------------------------------------------------------
 
-app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body || {};
-  const adminPassword = getSetting('admin_password') || 'changeme';
-  if (password !== adminPassword) {
-    return res.status(401).json({ error: '密碼錯誤' });
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    const adminPassword = (await getSetting('admin_password')) || 'changeme';
+    if (password !== adminPassword) {
+      return res.status(401).json({ error: '密碼錯誤' });
+    }
+    res.json({ token: issueToken() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
   }
-  res.json({ token: issueToken() });
 });
 
-app.get('/api/admin/bookings', requireAdmin, (req, res) => {
-  const rows = db.prepare('SELECT * FROM bookings ORDER BY date DESC, start_time DESC').all();
-  const bookings = rows.map((b) => ({ ...b, answers: b.answers ? JSON.parse(b.answers) : [] }));
-  res.json({ bookings });
+app.get('/api/admin/bookings', requireAdmin, async (req, res) => {
+  try {
+    const result = await client.execute('SELECT * FROM bookings ORDER BY date DESC, start_time DESC');
+    const bookings = result.rows.map((b) => ({ ...b, answers: b.answers ? JSON.parse(b.answers) : [] }));
+    res.json({ bookings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
 });
 
 app.post('/api/admin/bookings/:id/cancel', requireAdmin, async (req, res) => {
-  const booking = db.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id);
-  if (!booking) return res.status(404).json({ error: '找不到此預約' });
+  try {
+    const bookingRes = await client.execute({
+      sql: 'SELECT * FROM bookings WHERE id = ?',
+      args: [req.params.id],
+    });
+    const booking = bookingRes.rows[0];
+    if (!booking) return res.status(404).json({ error: '找不到此預約' });
 
-  db.prepare("UPDATE bookings SET status = 'cancelled' WHERE id = ?").run(booking.id);
+    await client.execute({
+      sql: "UPDATE bookings SET status = 'cancelled' WHERE id = ?",
+      args: [booking.id],
+    });
 
-  if (booking.calendar_event_id) {
-    googleCalendar.deleteEvent(booking.calendar_event_id).catch(() => {});
+    if (booking.calendar_event_id) {
+      googleCalendar.deleteEvent(booking.calendar_event_id).catch(() => {});
+    }
+    const parsedAnswers = booking.answers ? JSON.parse(booking.answers) : [];
+    mailer.sendCancellation({ ...booking, answers: parsedAnswers }).catch(() => {});
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
   }
-  const parsedAnswers = booking.answers ? JSON.parse(booking.answers) : [];
-  mailer.sendCancellation({ ...booking, answers: parsedAnswers }).catch(() => {});
-
-  res.json({ ok: true });
 });
 
-app.get('/api/admin/rules', requireAdmin, (req, res) => {
-  const rules = db.prepare('SELECT * FROM availability_rules ORDER BY weekday ASC, start_time ASC').all();
-  res.json({ rules });
+app.get('/api/admin/rules', requireAdmin, async (req, res) => {
+  try {
+    const result = await client.execute('SELECT * FROM availability_rules ORDER BY weekday ASC, start_time ASC');
+    res.json({ rules: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
 });
 
-app.post('/api/admin/rules', requireAdmin, (req, res) => {
+app.post('/api/admin/rules', requireAdmin, async (req, res) => {
   const { rules } = req.body || {};
   if (!Array.isArray(rules)) return res.status(400).json({ error: '格式錯誤' });
 
-  const tx = db.transaction((rulesList) => {
-    db.prepare('DELETE FROM availability_rules').run();
-    const insert = db.prepare(
-      'INSERT INTO availability_rules (weekday, start_time, end_time) VALUES (?, ?, ?)'
-    );
-    for (const r of rulesList) {
-      if (
-        typeof r.weekday !== 'number' ||
-        r.weekday < 0 ||
-        r.weekday > 6 ||
-        !r.start_time ||
-        !r.end_time ||
-        timeToMinutes(r.start_time) >= timeToMinutes(r.end_time)
-      ) {
-        throw new Error('時段規則格式錯誤');
-      }
-      insert.run(r.weekday, r.start_time, r.end_time);
+  for (const r of rules) {
+    if (
+      typeof r.weekday !== 'number' ||
+      r.weekday < 0 ||
+      r.weekday > 6 ||
+      !r.start_time ||
+      !r.end_time ||
+      timeToMinutes(r.start_time) >= timeToMinutes(r.end_time)
+    ) {
+      return res.status(400).json({ error: '時段規則格式錯誤' });
     }
-  });
+  }
 
   try {
-    tx(rules);
+    const stmts = [{ sql: 'DELETE FROM availability_rules', args: [] }];
+    for (const r of rules) {
+      stmts.push({
+        sql: 'INSERT INTO availability_rules (weekday, start_time, end_time) VALUES (?, ?, ?)',
+        args: [r.weekday, r.start_time, r.end_time],
+      });
+    }
+    await client.batch(stmts, 'write');
     res.json({ ok: true });
   } catch (err) {
+    console.error(err);
     res.status(400).json({ error: err.message });
   }
 });
 
-app.get('/api/admin/blocked-dates', requireAdmin, (req, res) => {
-  const dates = db.prepare('SELECT * FROM blocked_dates ORDER BY date ASC').all();
-  res.json({ dates });
-});
-
-app.post('/api/admin/blocked-dates', requireAdmin, (req, res) => {
-  const { date } = req.body || {};
-  if (!date || !dayjs(date, 'YYYY-MM-DD', true).isValid()) {
-    return res.status(400).json({ error: '日期格式錯誤' });
+app.get('/api/admin/blocked-dates', requireAdmin, async (req, res) => {
+  try {
+    const result = await client.execute('SELECT * FROM blocked_dates ORDER BY date ASC');
+    res.json({ dates: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
   }
-  db.prepare('INSERT INTO blocked_dates (date) VALUES (?)').run(date);
-  res.json({ ok: true });
 });
 
-app.delete('/api/admin/blocked-dates/:id', requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM blocked_dates WHERE id = ?').run(req.params.id);
-  res.json({ ok: true });
+app.post('/api/admin/blocked-dates', requireAdmin, async (req, res) => {
+  try {
+    const { date } = req.body || {};
+    if (!date || !dayjs(date, 'YYYY-MM-DD', true).isValid()) {
+      return res.status(400).json({ error: '日期格式錯誤' });
+    }
+    await client.execute({ sql: 'INSERT INTO blocked_dates (date) VALUES (?)', args: [date] });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
 });
 
-app.get('/api/admin/questions', requireAdmin, (req, res) => {
-  const questions = db.prepare('SELECT * FROM questions ORDER BY sort_order ASC').all();
-  res.json({ questions });
+app.delete('/api/admin/blocked-dates/:id', requireAdmin, async (req, res) => {
+  try {
+    await client.execute({ sql: 'DELETE FROM blocked_dates WHERE id = ?', args: [req.params.id] });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
 });
 
-app.post('/api/admin/questions', requireAdmin, (req, res) => {
+app.get('/api/admin/questions', requireAdmin, async (req, res) => {
+  try {
+    const questions = await getQuestions();
+    res.json({ questions });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
+});
+
+app.post('/api/admin/questions', requireAdmin, async (req, res) => {
   const { questions } = req.body || {};
   if (!Array.isArray(questions)) return res.status(400).json({ error: '格式錯誤' });
 
-  const tx = db.transaction((list) => {
-    db.prepare('DELETE FROM questions').run();
-    const insert = db.prepare(
-      'INSERT INTO questions (label, required, sort_order) VALUES (?, ?, ?)'
-    );
-    list.forEach((q, i) => {
-      if (!q.label || !q.label.trim()) throw new Error('問題內容不可為空');
-      insert.run(q.label.trim(), q.required ? 1 : 0, i);
-    });
-  });
+  const normalized = [];
+  for (const q of questions) {
+    if (!q.label || !q.label.trim()) return res.status(400).json({ error: '問題內容不可為空' });
+    const type = q.type === 'choice' ? 'choice' : 'text';
+    let options = [];
+    if (type === 'choice') {
+      options = Array.isArray(q.options) ? q.options.map((o) => String(o).trim()).filter(Boolean) : [];
+      if (options.length < 2) {
+        return res.status(400).json({ error: `「${q.label}」選擇題至少需要 2 個選項` });
+      }
+    }
+    normalized.push({ label: q.label.trim(), type, options, required: !!q.required });
+  }
 
   try {
-    tx(questions);
+    const stmts = [{ sql: 'DELETE FROM questions', args: [] }];
+    normalized.forEach((q, i) => {
+      stmts.push({
+        sql: 'INSERT INTO questions (label, type, options, required, sort_order) VALUES (?, ?, ?, ?, ?)',
+        args: [q.label, q.type, q.type === 'choice' ? JSON.stringify(q.options) : null, q.required ? 1 : 0, i],
+      });
+    });
+    await client.batch(stmts, 'write');
     res.json({ ok: true });
   } catch (err) {
+    console.error(err);
     res.status(400).json({ error: err.message });
   }
 });
 
-app.get('/api/admin/settings', requireAdmin, (req, res) => {
-  const s = getAllSettings();
-  delete s.admin_password;
-  res.json({ settings: s });
+app.get('/api/admin/settings', requireAdmin, async (req, res) => {
+  try {
+    const s = await getAllSettings();
+    delete s.admin_password;
+    res.json({ settings: s });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
 });
 
-app.post('/api/admin/settings', requireAdmin, (req, res) => {
-  const allowed = [
-    'business_name',
-    'slot_duration_min',
-    'buffer_min',
-    'timezone',
-    'booking_window_days',
-  ];
-  const body = req.body || {};
-  for (const key of allowed) {
-    if (body[key] !== undefined && body[key] !== '') {
-      setSetting(key, body[key]);
+app.post('/api/admin/settings', requireAdmin, async (req, res) => {
+  try {
+    const allowed = [
+      'business_name',
+      'slot_duration_min',
+      'buffer_min',
+      'timezone',
+      'booking_window_days',
+    ];
+    const body = req.body || {};
+    for (const key of allowed) {
+      if (body[key] !== undefined && body[key] !== '') {
+        await setSetting(key, body[key]);
+      }
     }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
   }
-  res.json({ ok: true });
 });
 
-app.post('/api/admin/change-password', requireAdmin, (req, res) => {
-  const { newPassword } = req.body || {};
-  if (!newPassword || newPassword.length < 4) {
-    return res.status(400).json({ error: '新密碼至少需要 4 個字元' });
+app.post('/api/admin/change-password', requireAdmin, async (req, res) => {
+  try {
+    const { newPassword } = req.body || {};
+    if (!newPassword || newPassword.length < 4) {
+      return res.status(400).json({ error: '新密碼至少需要 4 個字元' });
+    }
+    await setSetting('admin_password', newPassword);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
   }
-  setSetting('admin_password', newPassword);
-  res.json({ ok: true });
 });
 
 app.get('/admin', (req, res) => {
@@ -323,14 +430,27 @@ app.get('/admin', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`預約系統已啟動： http://localhost:${PORT}`);
-  console.log(`管理後台： http://localhost:${PORT}/admin`);
-  if (!mailer.isConfigured()) {
-    console.log('[提醒] 尚未設定 SMTP，確認信/提醒信將不會實際寄出（見 .env）');
-  }
-  if (!googleCalendar.isConfigured()) {
-    console.log('[提醒] 尚未設定 Google 授權，將不會產生 Google Meet 連結（見 README）');
-  }
-  reminderScheduler.start();
-});
+
+ready
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`預約系統已啟動： http://localhost:${PORT}`);
+      console.log(`管理後台： http://localhost:${PORT}/admin`);
+      console.log(
+        process.env.TURSO_DATABASE_URL
+          ? '[資料庫] 使用 Turso 雲端資料庫（資料永久保存）'
+          : '[資料庫] 使用本機檔案資料庫（僅供本地開發測試，正式環境請設定 TURSO_DATABASE_URL）'
+      );
+      if (!mailer.isConfigured()) {
+        console.log('[提醒] 尚未設定 SMTP，確認信/提醒信將不會實際寄出（見 .env）');
+      }
+      if (!googleCalendar.isConfigured()) {
+        console.log('[提醒] 尚未設定 Google 授權，將不會產生 Google Meet 連結（見 README）');
+      }
+      reminderScheduler.start();
+    });
+  })
+  .catch((err) => {
+    console.error('資料庫初始化失敗，伺服器無法啟動:', err);
+    process.exit(1);
+  });

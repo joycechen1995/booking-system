@@ -1,15 +1,16 @@
 const cron = require('node-cron');
 const dayjs = require('dayjs');
-const db = require('./db');
+const { client } = require('./db');
 const { sendReminder } = require('./mailer');
 
 // 每分鐘檢查一次，找出「即將在 55~65 分鐘後開始」且尚未寄送提醒的預約。
 // 用一個區間而不是精準 60 分鐘，是為了避免因排程誤差而漏寄。
-function checkAndSendReminders() {
+async function checkAndSendReminders() {
   const now = dayjs();
-  const bookings = db
-    .prepare("SELECT * FROM bookings WHERE status = 'confirmed' AND reminder_sent = 0")
-    .all();
+  const res = await client.execute(
+    "SELECT * FROM bookings WHERE status = 'confirmed' AND reminder_sent = 0"
+  );
+  const bookings = res.rows;
 
   for (const booking of bookings) {
     const start = dayjs(`${booking.date} ${booking.start_time}`, 'YYYY-MM-DD HH:mm');
@@ -17,8 +18,11 @@ function checkAndSendReminders() {
     if (diffMin <= 60 && diffMin >= 50) {
       const parsedAnswers = booking.answers ? JSON.parse(booking.answers) : [];
       sendReminder({ ...booking, answers: parsedAnswers })
-        .then(() => {
-          db.prepare('UPDATE bookings SET reminder_sent = 1 WHERE id = ?').run(booking.id);
+        .then(async () => {
+          await client.execute({
+            sql: 'UPDATE bookings SET reminder_sent = 1 WHERE id = ?',
+            args: [booking.id],
+          });
         })
         .catch((err) => {
           console.error(`[reminder] 寄送失敗 booking#${booking.id}:`, err.message);
@@ -29,7 +33,11 @@ function checkAndSendReminders() {
 
 function start() {
   // 每分鐘執行一次
-  cron.schedule('* * * * *', checkAndSendReminders);
+  cron.schedule('* * * * *', () => {
+    checkAndSendReminders().catch((err) => {
+      console.error('[reminder] 檢查提醒時發生錯誤:', err.message);
+    });
+  });
   console.log('[reminder] 提醒排程已啟動（每分鐘檢查一次）');
 }
 

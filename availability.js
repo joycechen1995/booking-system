@@ -1,5 +1,5 @@
 const dayjs = require('dayjs');
-const db = require('./db');
+const { client } = require('./db');
 const { getSetting } = require('./settings');
 
 function timeToMinutes(t) {
@@ -19,31 +19,34 @@ function minutesToTime(min) {
  * 回傳指定日期的可預約時段陣列，例如 ['09:00','09:30',...]
  * 會排除：已被預約的時段、封鎖日期、已過去的時間（若為今天）
  */
-function getAvailableSlots(dateStr) {
+async function getAvailableSlots(dateStr) {
   const date = dayjs(dateStr, 'YYYY-MM-DD', true);
   if (!date.isValid()) return [];
 
-  const blocked = db
-    .prepare('SELECT 1 FROM blocked_dates WHERE date = ?')
-    .get(dateStr);
-  if (blocked) return [];
+  const blockedRes = await client.execute({
+    sql: 'SELECT 1 FROM blocked_dates WHERE date = ?',
+    args: [dateStr],
+  });
+  if (blockedRes.rows.length > 0) return [];
 
   const weekday = date.day();
-  const rules = db
-    .prepare('SELECT * FROM availability_rules WHERE weekday = ?')
-    .all(weekday);
+  const rulesRes = await client.execute({
+    sql: 'SELECT * FROM availability_rules WHERE weekday = ?',
+    args: [weekday],
+  });
+  const rules = rulesRes.rows;
   if (rules.length === 0) return [];
 
-  const duration = parseInt(getSetting('slot_duration_min') || '30', 10);
-  const buffer = parseInt(getSetting('buffer_min') || '0', 10);
+  const duration = parseInt((await getSetting('slot_duration_min')) || '30', 10);
+  const buffer = parseInt((await getSetting('buffer_min')) || '0', 10);
   const step = duration + buffer;
 
   // 已被預約（未取消）的時段
-  const existing = db
-    .prepare(
-      "SELECT start_time, end_time FROM bookings WHERE date = ? AND status = 'confirmed'"
-    )
-    .all(dateStr);
+  const existingRes = await client.execute({
+    sql: "SELECT start_time, end_time FROM bookings WHERE date = ? AND status = 'confirmed'",
+    args: [dateStr],
+  });
+  const existing = existingRes.rows;
 
   const slots = [];
   for (const rule of rules) {
@@ -74,8 +77,8 @@ function getAvailableSlots(dateStr) {
   return slots;
 }
 
-function isWithinBookingWindow(dateStr) {
-  const windowDays = parseInt(getSetting('booking_window_days') || '30', 10);
+async function isWithinBookingWindow(dateStr) {
+  const windowDays = parseInt((await getSetting('booking_window_days')) || '30', 10);
   const date = dayjs(dateStr, 'YYYY-MM-DD', true);
   const today = dayjs().startOf('day');
   if (!date.isValid()) return false;

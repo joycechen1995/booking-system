@@ -1,20 +1,21 @@
-const db = require('./db');
+const { client } = require('./db');
 
-function getSetting(key) {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-  return row ? row.value : undefined;
+async function getSetting(key) {
+  const res = await client.execute({ sql: 'SELECT value FROM settings WHERE key = ?', args: [key] });
+  return res.rows[0] ? res.rows[0].value : undefined;
 }
 
-function setSetting(key, value) {
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).run(key, String(value));
+async function setSetting(key, value) {
+  await client.execute({
+    sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    args: [key, String(value)],
+  });
 }
 
-function getAllSettings() {
-  const rows = db.prepare('SELECT key, value FROM settings').all();
+async function getAllSettings() {
+  const res = await client.execute('SELECT key, value FROM settings');
   const out = {};
-  for (const r of rows) out[r.key] = r.value;
+  for (const r of res.rows) out[r.key] = r.value;
   return out;
 }
 
