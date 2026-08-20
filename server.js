@@ -92,6 +92,34 @@ app.get('/api/availability', async (req, res) => {
   }
 });
 
+// 一次回傳整個月「每一天是否還有可預約時段」，讓前台日曆能把沒有開放的日期
+// （例如沒有設定營業時段的星期幾、已被完全約滿的日子、超出預約視窗的日子）
+// 直接顯示為不可點選，避免使用者點進去才發現是空的、造成誤會。
+app.get('/api/availability/month', async (req, res) => {
+  try {
+    const year = parseInt(req.query.year, 10);
+    const month = parseInt(req.query.month, 10); // 1-12
+    if (!year || !month || month < 1 || month > 12) {
+      return res.status(400).json({ error: '年份或月份格式錯誤' });
+    }
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const days = {};
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      if (!(await isWithinBookingWindow(dateStr))) {
+        days[dateStr] = false;
+        continue;
+      }
+      const slots = await getAvailableSlots(dateStr);
+      days[dateStr] = slots.length > 0;
+    }
+    res.json({ days });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: '伺服器發生錯誤，請稍後再試' });
+  }
+});
+
 app.post('/api/bookings', async (req, res) => {
   try {
     const { date, start_time, name, email, answers } = req.body || {};
