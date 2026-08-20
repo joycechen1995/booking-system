@@ -71,9 +71,21 @@
     renderCalendar();
   }
 
-  function renderCalendar() {
+  async function renderCalendar() {
     const month = state.viewMonth;
     el.monthLabel.textContent = month.format('YYYY年MM月');
+
+    // 先跟後端要這個月「哪幾天還有時段」，這樣沒有開放（例如沒設定營業的星期幾、
+    // 已經約滿、超出預約視窗）的日子可以直接顯示成不可點選，使用者就不會點進去才發現是空的。
+    let dayAvailability = {};
+    try {
+      const res = await fetch(`/api/availability/month?year=${month.year()}&month=${month.month() + 1}`);
+      const data = await res.json();
+      dayAvailability = data.days || {};
+    } catch (err) {
+      // 若查詢失敗，退回原本「視窗內都可點」的行為，避免整個日曆壞掉
+      dayAvailability = null;
+    }
 
     const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
     let html = weekdays.map((w) => `<div class="weekday">${w}</div>`).join('');
@@ -92,13 +104,15 @@
       const dateStr = cellDate.format('YYYY-MM-DD');
       const diff = cellDate.diffDays(today);
       const inWindow = diff >= 0 && diff <= maxDays;
+      const hasSlots = dayAvailability ? !!dayAvailability[dateStr] : inWindow;
+      const clickable = inWindow && hasSlots;
       const isSelected = state.selectedDate === dateStr;
       const cls = ['day-cell'];
-      if (!inWindow) cls.push('disabled');
+      if (!clickable) cls.push('disabled');
       else cls.push('available');
       if (isSelected) cls.push('selected');
 
-      html += `<div class="${cls.join(' ')}" data-date="${inWindow ? dateStr : ''}">${d}</div>`;
+      html += `<div class="${cls.join(' ')}" data-date="${clickable ? dateStr : ''}">${d}</div>`;
     }
 
     el.calendarGrid.innerHTML = html;
