@@ -141,8 +141,11 @@ app.post('/api/bookings', async (req, res) => {
     let meetLink = null;
     let calendarEventId = null;
     try {
-      const startDateTime = dayjs(`${date} ${start_time}`, 'YYYY-MM-DD HH:mm').toISOString();
-      const endDateTime = dayjs(`${date} ${endTime}`, 'YYYY-MM-DD HH:mm').toISOString();
+      // 注意：不能用 .toISOString()，那會把「台北時間的數字」誤標成 UTC，
+      // 導致 Google 日曆上的時間整整差 8 小時（甚至跨到隔天）。
+      // 這裡改成不帶時區的純本地時間字串，交給下面的 timeZone 欄位正確轉換。
+      const startDateTime = dayjs(`${date} ${start_time}`, 'YYYY-MM-DD HH:mm').format('YYYY-MM-DDTHH:mm:ss');
+      const endDateTime = dayjs(`${date} ${endTime}`, 'YYYY-MM-DD HH:mm').format('YYYY-MM-DDTHH:mm:ss');
       const result = await googleCalendar.createMeetEvent({
         summary: `${businessName} - ${name}`,
         description: '透過線上預約系統建立',
